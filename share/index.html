@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Surface Share</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #171717;
+      --muted: #667085;
+      --line: #d8dee8;
+      --paper: #ffffff;
+      --soft: #f5f7fb;
+      --blue: #2f6fda;
+      --green: #2f8a58;
+      --amber: #d3942f;
+      --red: #cf2436;
+      --purple: #7655c7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    }
+    main {
+      min-height: 100vh;
+      width: min(980px, calc(100vw - 28px));
+      margin: 0 auto;
+      display: grid;
+      grid-template-rows: 1fr auto auto;
+      gap: 18px;
+      padding: 24px 0;
+    }
+    h1, .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: 0;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .stage {
+      min-height: min(70vh, 680px);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: linear-gradient(180deg, #ffffff, var(--soft));
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+    svg {
+      width: min(760px, 92vw);
+      height: auto;
+      aspect-ratio: 1.35;
+      display: block;
+      overflow: visible;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 10px;
+      align-items: center;
+    }
+    .chat-log {
+      min-height: 88px;
+      max-height: 210px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 10px;
+      display: grid;
+      align-content: start;
+      gap: 8px;
+    }
+    .chat-message {
+      width: fit-content;
+      max-width: min(720px, 92%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: var(--soft);
+      color: var(--ink);
+      font-size: 0.94rem;
+    }
+    .chat-message[data-role="surface"] {
+      justify-self: end;
+      background: #eef4ff;
+      border-color: #c8d8f6;
+    }
+    input {
+      min-width: 0;
+      min-height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font: inherit;
+      background: #ffffff;
+      color: var(--ink);
+    }
+    button {
+      min-height: 44px;
+      border: 1px solid var(--ink);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font: inherit;
+      color: #ffffff;
+      background: var(--ink);
+      cursor: pointer;
+    }
+    .voice-button {
+      background: #ffffff;
+      color: var(--ink);
+      border-color: var(--line);
+      min-width: 82px;
+    }
+    .voice-button[aria-pressed="true"] {
+      background: var(--red);
+      border-color: var(--red);
+      color: #ffffff;
+    }
+    @media (max-width: 560px) {
+      main { width: min(100vw - 20px, 980px); }
+      .controls { grid-template-columns: 1fr auto; }
+      .controls input { grid-column: 1 / -1; }
+      .stage { min-height: 58vh; }
+    }
+  </style>
+</head>
+<body>
+  <main data-share-mode="browser-only">
+    <h1>Live Surface Share</h1>
+    <section class="stage" aria-label="Live Surface share sketch">
+      <svg id="shareCanvas" viewBox="0 0 100 74" role="img" aria-label="Rendered sketch"></svg>
+    </section>
+    <section class="chat-log" id="shareChatLog" aria-label="Live Surface share chat" aria-live="polite"></section>
+    <form class="controls" id="shareChatForm" autocomplete="off">
+      <label class="sr-only" for="sharePrompt">Prompt</label>
+      <input id="sharePrompt" maxlength="160" value="train station sign">
+      <button class="voice-button" id="shareVoiceButton" type="button" aria-label="Record voice" aria-pressed="false">Voice</button>
+      <button type="submit">Render</button>
+    </form>
+  </main>
+  <script>
+    (() => {
+      const form = document.getElementById("shareChatForm");
+      const input = document.getElementById("sharePrompt");
+      const voiceButton = document.getElementById("shareVoiceButton");
+      const svg = document.getElementById("shareCanvas");
+      const chatLog = document.getElementById("shareChatLog");
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      let recognition = null;
+      let isVoiceActive = false;
+      let voiceFinalText = "";
+      let voiceLastRenderedText = "";
+      const colors = {
+        blue: "#2f6fda",
+        green: "#2f8a58",
+        amber: "#d3942f",
+        red: "#cf2436",
+        purple: "#7655c7",
+        slate: "#667085",
+        black: "#171717",
+        white: "#ffffff",
+        sienna: "#8b6237"
+      };
+
+      function colorFor(text) {
+        const lowered = text.toLowerCase();
+        for (const name of ["red", "blue", "green", "purple", "amber"]) {
+          if (lowered.includes(name)) return colors[name];
+        }
+        return colors.blue;
+      }
+
+      function sketchFor(text) {
+        const lowered = text.toLowerCase();
+        const accent = colorFor(text);
+        if (/(banana|fruit|food)/.test(lowered)) {
+          return [
+            ["ellipse", { id: "banana-shadow", cx: 50, cy: 60, rx: 28, ry: 5, fill: colors.slate, opacity: 0.25 }],
+            ["path", { id: "banana-body", d: "M24 34 C36 58 66 62 82 36 C66 75 34 72 18 42 Z", fill: "#f2c84b" }],
+            ["path", { id: "banana-ridge", d: "M28 39 C42 55 63 58 77 39 C62 62 40 61 24 43 Z", fill: "#ffe17a" }],
+            ["circle", { id: "banana-stem", cx: 20, cy: 40, r: 3, fill: colors.sienna }],
+            ["circle", { id: "banana-tip", cx: 82, cy: 36, r: 3, fill: colors.sienna }],
+            ["text", { x: 50, y: 22, text: "BANANA", fill: colors.black }]
+          ];
+        }
+        if (/(train|station|platform)/.test(lowered)) {
+          return [
+            ["rect", { x: 8, y: 50, width: 84, height: 10, rx: 3, fill: colors.slate }],
+            ["path", { d: "M16 68 L41 54 L46 54 L27 72 Z M58 54 L84 68 L74 72 L53 54 Z", fill: colors.black }],
+            ["rect", { x: 22, y: 28, width: 42, height: 20, rx: 4, fill: accent }],
+            ["rect", { x: 30, y: 33, width: 22, height: 7, rx: 2, fill: colors.white }],
+            ["text", { x: 72, y: 22, text: "STATION", fill: colors.black }],
+            ["circle", { cx: 72, cy: 36, r: 6, fill: colors.white }],
+            ["circle", { cx: 78, cy: 48, r: 4, fill: colors.sienna }]
+          ];
+        }
+        if (/(car|road|vehicle)/.test(lowered)) {
+          return [
+            ["rect", { x: 10, y: 56, width: 80, height: 10, rx: 3, fill: colors.slate }],
+            ["rect", { x: 24, y: 34, width: 52, height: 20, rx: 6, fill: accent }],
+            ["rect", { x: 42, y: 27, width: 22, height: 12, rx: 4, fill: colors.blue }],
+            ["circle", { cx: 34, cy: 56, r: 6, fill: colors.black }],
+            ["circle", { cx: 66, cy: 56, r: 6, fill: colors.black }],
+            ["circle", { cx: 77, cy: 43, r: 3, fill: colors.amber }]
+          ];
+        }
+        if (/(people|person|room)/.test(lowered)) {
+          return [
+            ["rect", { x: 12, y: 10, width: 76, height: 38, rx: 5, fill: colors.slate }],
+            ["path", { d: "M12 48 L88 48 L96 70 L4 70 Z", fill: colors.amber }],
+            ["rect", { x: 32, y: 36, width: 12, height: 23, rx: 4, fill: colors.green }],
+            ["circle", { cx: 38, cy: 29, r: 6, fill: colors.sienna }],
+            ["rect", { x: 56, y: 37, width: 12, height: 22, rx: 4, fill: colors.purple }],
+            ["circle", { cx: 62, cy: 30, r: 6, fill: colors.sienna }],
+            ["circle", { cx: 50, cy: 18, r: 5, fill: colors.amber }]
+          ];
+        }
+        return [
+          ["rect", { x: 14, y: 14, width: 72, height: 40, rx: 8, fill: colors.slate }],
+          ["circle", { cx: 50, cy: 34, r: 14, fill: accent }],
+          ["ellipse", { cx: 50, cy: 58, rx: 28, ry: 5, fill: colors.slate }],
+          ["text", { x: 50, y: 35, text: text.slice(0, 18) || "SKETCH", fill: colors.white }]
+        ];
+      }
+
+      function setAttrs(node, attrs) {
+        Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, String(value)));
+      }
+
+      function appendChatMessage(role, text) {
+        const message = document.createElement("p");
+        message.className = "chat-message";
+        message.dataset.role = role;
+        message.textContent = String(text || "").replace(/\s+/g, " ").trim();
+        chatLog.append(message);
+        chatLog.scrollTop = chatLog.scrollHeight;
+      }
+
+      function renderBrowserSketch(text) {
+        svg.replaceChildren();
+        sketchFor(text).forEach(([kind, attrs]) => {
+          const node = document.createElementNS("http://www.w3.org/2000/svg", kind);
+          setAttrs(node, attrs);
+          if (kind === "text") {
+            node.textContent = attrs.text || "";
+            node.setAttribute("font-size", "5");
+            node.setAttribute("font-weight", "650");
+            node.setAttribute("text-anchor", "middle");
+            node.setAttribute("dominant-baseline", "middle");
+          }
+          svg.appendChild(node);
+        });
+      }
+
+      function setShareVoiceActive(active) {
+        isVoiceActive = Boolean(active);
+        voiceButton.setAttribute("aria-pressed", isVoiceActive ? "true" : "false");
+        voiceButton.textContent = isVoiceActive ? "Stop" : "Voice";
+      }
+
+      function handleShareVoiceResult(text, isFinal) {
+        const cleaned = String(text || "").replace(/\s+/g, " ").trim();
+        if (!cleaned) return;
+        input.value = cleaned;
+        renderBrowserSketch(cleaned);
+        voiceLastRenderedText = cleaned;
+        if (isFinal) {
+          voiceFinalText = cleaned;
+        }
+      }
+
+      function commitShareVoiceText() {
+        const text = (voiceFinalText || voiceLastRenderedText || input.value || "").trim();
+        if (!text) return;
+        appendChatMessage("user", text);
+        appendChatMessage("surface", `Rendered: ${text}`);
+        voiceFinalText = "";
+        voiceLastRenderedText = "";
+      }
+
+      function stopShareVoice() {
+        if (recognition) {
+          recognition.onend = null;
+          recognition.stop();
+          recognition = null;
+        }
+        setShareVoiceActive(false);
+        commitShareVoiceText();
+      }
+
+      function startShareVoice() {
+        if (!SpeechRecognition) {
+          appendChatMessage("surface", "Voice is unavailable in this browser.");
+          input.focus();
+          return;
+        }
+        recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = navigator.language || "en-US";
+        voiceFinalText = "";
+        voiceLastRenderedText = "";
+        recognition.onresult = (event) => {
+          let finalText = "";
+          let interimText = "";
+          for (let index = event.resultIndex; index < event.results.length; index += 1) {
+            const result = event.results[index];
+            const transcript = result[0] ? result[0].transcript : "";
+            if (result.isFinal) {
+              finalText += transcript;
+            } else {
+              interimText += transcript;
+            }
+          }
+          handleShareVoiceResult(finalText || interimText, Boolean(finalText));
+        };
+        recognition.onerror = () => {
+          setShareVoiceActive(false);
+        };
+        recognition.onend = () => {
+          setShareVoiceActive(false);
+          commitShareVoiceText();
+          recognition = null;
+        };
+        setShareVoiceActive(true);
+        recognition.start();
+      }
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        appendChatMessage("user", input.value);
+        renderBrowserSketch(input.value);
+        appendChatMessage("surface", `Rendered: ${input.value}`);
+      });
+      voiceButton.addEventListener("click", () => {
+        if (isVoiceActive) {
+          stopShareVoice();
+        } else {
+          startShareVoice();
+        }
+      });
+      input.addEventListener("input", () => renderBrowserSketch(input.value));
+      renderBrowserSketch(input.value);
+      appendChatMessage("surface", "Live Surface Share is ready.");
+      window.renderBrowserSketch = renderBrowserSketch;
+      window.appendChatMessage = appendChatMessage;
+      window.handleShareVoiceResult = handleShareVoiceResult;
+    })();
+  </script>
+</body>
+</html>
